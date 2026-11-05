@@ -265,10 +265,13 @@ To balance requirements for all use cases, the compliance is governed by setting
 
   While not strictly YAML-compliant, under-indented entries and delimiters in flow sequences
   and mappings are accepted for compatibility with PyYAML, ruamel.yaml, and real-world inputs.
+  Under-indented quoted scalar continuations are also accepted, including in block context
+  (for example, `foo: "a\nb"` with an actual line break folds to `a b`).
   Under-indented implicit mapping keys must keep the key and its `:` on the same line.
 
-  Set [`strict_indentation: true`](https://docs.rs/granit-parser/latest/granit_parser/struct.Options.html#structfield.strict_indentation) to require YAML-compliant flow indentation, including entries,
-  delimiters, and multiline scalar continuations. The default is `false`.
+  Set [`strict_indentation: true`](https://docs.rs/granit-parser/latest/granit_parser/struct.Options.html#structfield.strict_indentation) to require YAML-compliant indentation for flow entries,
+  delimiters, and multiline scalar continuations, including quoted scalars in block context.
+  The default is `false`.
 
   ```rust
   use granit_parser::{options, Parser};

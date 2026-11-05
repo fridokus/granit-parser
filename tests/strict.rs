@@ -253,6 +253,47 @@ fn strict_rejects_under_indented_escaped_line_breaks_in_block_context() {
 }
 
 #[test]
+fn strict_rejects_under_indented_quoted_continuations_in_block_context() {
+    for (prefix, parent_indent) in [
+        ("foo: ", 0),
+        ("- ", 0),
+        ("outer:\n  foo: ", 2),
+        ("- foo: ", 2),
+        ("? foo\n: ", 0),
+    ] {
+        for quote in ['\'', '"'] {
+            for line_break in ["\n", "\r\n"] {
+                let prefix = prefix.replace('\n', line_break);
+                for blank_lines in 0..=2 {
+                    let breaks = line_break.repeat(blank_lines + 1);
+                    let reference = if blank_lines == 0 {
+                        format!("{prefix}{quote}a b{quote}{line_break}")
+                    } else {
+                        format!(
+                            "{prefix}{quote}a{breaks}{}b{quote}{line_break}",
+                            " ".repeat(parent_indent + 1),
+                        )
+                    };
+                    for indent in 0..=parent_indent {
+                        let yaml = format!(
+                            "{prefix}{quote}a{breaks}{}b{quote}{line_break}",
+                            " ".repeat(indent),
+                        );
+                        assert_relaxed_only_with_kind(
+                            &yaml,
+                            &reference,
+                            prefix.lines().count() + blank_lines + 1,
+                            indent,
+                            &ErrorKind::InvalidQuotedScalarIndent,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn strict_rejects_under_indented_closing_quotes_after_folded_line_breaks() {
     for quote in ['\'', '"'] {
         for (prefix, indent, line) in [("key: ", 0, 2), ("- ", 0, 2), ("outer:\n  key: ", 2, 3)] {

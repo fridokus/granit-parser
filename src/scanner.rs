@@ -3900,18 +3900,17 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
                 return Err(self.scan_error(ErrorKind::InvalidIndentation));
             }
 
-            // Continuation lines of a quoted scalar in block context must be indented more than
-            // the enclosing block (s-flow-line-prefix(n), YAML 1.2.2 [69]). Compare against that
-            // block's indentation, not the temporary one-column indent added after `:` / `-`:
-            // `foo: "a\n b"` is valid (n = 1). In strict mode this also applies to closing quotes.
-            if leading_blanks && has_leading_break && self.flow_level == 0 {
-                let next_ch = self.input.peek();
-                let is_closing_quote = (single && next_ch == '\'') || (!single && next_ch == '"');
-                if (!is_closing_quote || self.options.strict_indentation)
-                    && (self.mark.col as isize) <= self.flow_block_indent()
-                {
-                    return Err(self.scan_error(ErrorKind::InvalidQuotedScalarIndent));
-                }
+            // In strict mode, quoted continuations and closing quotes in block context must be
+            // indented past the enclosing block (s-flow-line-prefix(n), YAML 1.2.2 [69]). Compare
+            // against that block's indentation, not the temporary one-column indent after `:` / `-`:
+            // `foo: "a\n b"` is valid (n = 1). Default mode stays compatible with PyYAML / ruamel.yaml.
+            if leading_blanks
+                && has_leading_break
+                && self.options.strict_indentation
+                && self.flow_level == 0
+                && (self.mark.col as isize) <= self.flow_block_indent()
+            {
+                return Err(self.scan_error(ErrorKind::InvalidQuotedScalarIndent));
             }
 
             // An escaped line break (`\` at the end of a line) sets only `leading_blanks`, so the
@@ -6502,15 +6501,16 @@ mod test {
     }
 
     #[test]
-    fn quoted_scalar_rejects_underindented_continuation() {
-        assert_eq!(
-            first_scanner_error_kind("a: \"one\nbad\"\n"),
-            ErrorKind::InvalidQuotedScalarIndent
-        );
-        assert_eq!(
-            first_scanner_error_kind("a:\n  b: 'one\n  bad'\n"),
-            ErrorKind::InvalidQuotedScalarIndent
-        );
+    fn strict_quoted_scalar_rejects_underindented_continuation() {
+        for input in ["a: \"one\nbad\"\n", "a:\n  b: 'one\n  bad'\n"] {
+            let error = Scanner::with_options(
+                StrInput::new(input),
+                crate::options! { strict_indentation: true },
+            )
+            .find_map(Result::err)
+            .expect("strict mode must reject underindented quoted continuations");
+            assert_eq!(error.kind(), &ErrorKind::InvalidQuotedScalarIndent);
+        }
     }
 
     #[test]
