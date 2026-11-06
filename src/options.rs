@@ -54,6 +54,8 @@ pub struct Options {
     /// Comment presentation tokens do not satisfy this lookahead. Clean end-of-input drains
     /// the remaining tokens normally, but a lexical or source failure during prefetch stops
     /// parsing without yielding the uncommitted queue, including comments.
+    /// Plain-scalar content requests only its required two-character lookahead instead of
+    /// speculatively filling the input's bulk buffer.
     ///
     /// This changes error-prefix timing, not token contents, source spans, or alias resolution.
     /// It is independent of [`Self::go_compatible_anchors`]. With comment emission enabled,

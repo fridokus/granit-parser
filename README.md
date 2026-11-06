@@ -318,7 +318,8 @@ To balance requirements for all use cases, the compliance is governed by setting
   A lexical or source failure during prefetch suppresses the uncommitted queue; clean EOF
   still drains it normally. This changes which prefix events are observable before an
   error, not token contents, spans, tags, or anchor IDs. No source rewriting or retries
-  are performed.
+  are performed. Plain-scalar content requests only its required two-character window,
+  avoiding premature source failures from speculative bulk lookahead.
 
   The option defaults to `false` and is independent of `go_compatible_anchors`. When
   comments are emitted, prefetch respects `max_buffered_comment_events`. This extension

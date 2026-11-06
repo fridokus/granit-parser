@@ -1,4 +1,7 @@
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use granit_parser::{
     BorrowedInput, ErrorKind, Event, FallibleBufferedInput, Input, Options, Parser, ScanError,
@@ -53,22 +56,26 @@ fn go_mode_withholds_uncommitted_document_boundary_on_source_failure() {
     );
 }
 
-struct TerminalInput<'a> {
-    inner: StrInput<'a>,
+struct CurrentWindowInput<'a> {
+    chars: std::str::Chars<'a>,
+    window: usize,
     remaining: usize,
-    failed: bool,
+    failed: Rc<Cell<bool>>,
     error: Option<ErrorKind>,
     consumed: Rc<Cell<usize>>,
+    requests: Rc<RefCell<Vec<(usize, usize)>>>,
 }
 
-impl<'a> TerminalInput<'a> {
+impl<'a> CurrentWindowInput<'a> {
     fn new(source: &'a str, consumed: Rc<Cell<usize>>) -> Self {
         Self {
-            inner: StrInput::new(source),
+            chars: source.chars(),
+            window: 0,
             remaining: source.chars().count(),
-            failed: false,
+            failed: Rc::new(Cell::new(false)),
             error: None,
             consumed,
+            requests: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -79,60 +86,103 @@ impl<'a> TerminalInput<'a> {
     }
 }
 
-impl Input for TerminalInput<'_> {
+impl Input for CurrentWindowInput<'_> {
     fn lookahead(&mut self, count: usize) {
-        if count > self.remaining && !self.failed {
-            self.failed = true;
+        self.requests
+            .borrow_mut()
+            .push((self.consumed.get(), count));
+        self.window = count;
+        if count > self.remaining && !self.failed.get() {
+            self.failed.set(true);
             self.error = Some(source_error());
         }
-        self.inner.lookahead(count);
     }
     fn buflen(&self) -> usize {
-        self.inner.buflen()
+        self.window
     }
     fn bufmaxlen(&self) -> usize {
-        4
+        FallibleBufferedInput::new(std::iter::empty::<Result<char, ErrorKind>>()).bufmaxlen()
     }
     fn raw_read_ch(&mut self) -> char {
-        let value = self.inner.raw_read_ch();
-        self.advance(1);
-        value
+        self.chars.next().map_or('\0', |value| {
+            self.advance(1);
+            value
+        })
     }
     fn raw_read_non_breakz_ch(&mut self) -> Option<char> {
-        let value = self.inner.raw_read_non_breakz_ch();
-        if value.is_some() {
-            self.advance(1);
+        if granit_parser::input::is_breakz(self.peek()) {
+            None
+        } else {
+            Some(self.raw_read_ch())
         }
-        value
     }
     fn skip(&mut self) {
-        self.inner.skip();
-        self.advance(1);
+        if self.chars.next().is_some() {
+            self.advance(1);
+        }
     }
     fn skip_n(&mut self, count: usize) {
-        self.inner.skip_n(count);
+        let count = self.chars.by_ref().take(count).count();
         self.advance(count);
     }
     fn peek(&self) -> char {
-        self.inner.peek()
+        self.chars.clone().next().unwrap_or('\0')
     }
     fn peek_nth(&self, n: usize) -> char {
-        self.inner.peek_nth(n)
-    }
-    fn byte_offset(&self) -> Option<usize> {
-        self.inner.byte_offset()
-    }
-    fn slice_bytes(&self, start: usize, end: usize) -> Option<&str> {
-        self.inner.slice_bytes(start, end)
+        self.chars.clone().nth(n).unwrap_or('\0')
     }
     fn take_source_error(&mut self) -> Option<ErrorKind> {
         self.error.take()
     }
 }
 
-impl<'a> BorrowedInput<'a> for TerminalInput<'a> {
-    fn slice_borrowed(&self, start: usize, end: usize) -> Option<&'a str> {
-        self.inner.slice_borrowed(start, end)
+impl<'a> BorrowedInput<'a> for CurrentWindowInput<'a> {
+    fn slice_borrowed(&self, _start: usize, _end: usize) -> Option<&'a str> {
+        None
+    }
+}
+
+#[test]
+fn terminal_input_exposes_only_the_current_window_without_borrowed_capabilities() {
+    let consumed = Rc::new(Cell::new(0));
+    let mut input = CurrentWindowInput::new("abcdefgh\n", Rc::clone(&consumed));
+    assert_eq!(input.bufmaxlen(), 16);
+    input.lookahead(4);
+    assert_eq!(input.buflen(), 4);
+    input.lookahead(2);
+    assert_eq!(input.buflen(), 2);
+    input.lookahead(1);
+    assert_eq!(input.buflen(), 1);
+    assert!(!input.failed.get());
+    assert_eq!(input.byte_offset(), None);
+    assert_eq!(input.slice_bytes(0, 0), None);
+    assert_eq!(input.slice_borrowed(0, 0), None);
+    assert_eq!(consumed.get(), 0);
+    input.lookahead(16);
+    assert!(input.failed.get());
+    assert_eq!(input.take_source_error(), Some(source_error()));
+    assert_eq!(input.take_source_error(), None);
+}
+
+#[test]
+fn plain_scalar_content_uses_required_lookahead_only_in_go_mode() {
+    let source = "ordinary_scalar_α_with_an_inner:colon\n";
+    for enabled in [false, true] {
+        let consumed = Rc::new(Cell::new(0));
+        let input = CurrentWindowInput::new(source, Rc::clone(&consumed));
+        let requests = Rc::clone(&input.requests);
+        let trace = Scanner::with_options(input, options(enabled, false)).collect::<Vec<_>>();
+        assert_eq!(
+            trace.last().unwrap().as_ref().unwrap_err().kind(),
+            &source_error()
+        );
+        let requests = requests.borrow();
+        let first_content_request = requests.iter().find(|(position, _)| *position == 1);
+        assert_eq!(
+            first_content_request,
+            Some(&(1, if enabled { 2 } else { 16 }))
+        );
+        assert_eq!(consumed.get(), source.chars().count());
     }
 }
 
@@ -281,14 +331,8 @@ fn syntax_token_window_controls_completed_prefix_documents() {
     for (tail, expected) in [
         ("#\n", 0),
         ("description: harmless\n#\n", 1),
-        (
-            "[harmless]\n# harmless padding for the character window\n",
-            1,
-        ),
-        (
-            "{description: harmless}\n# harmless padding for the character window\n",
-            1,
-        ),
+        ("[harmless]\n", 1),
+        ("{description: harmless}\n", 1),
         ("*missing\n", 0),
         ("&a harmless\n", 0),
         ("!!str harmless\n", 0),
@@ -300,11 +344,25 @@ fn syntax_token_window_controls_completed_prefix_documents() {
     ] {
         let source = format!("a: safe\n---\n{tail}");
         let consumed = Rc::new(Cell::new(0));
-        let input = TerminalInput::new(&source, Rc::clone(&consumed));
+        let input = CurrentWindowInput::new(&source, Rc::clone(&consumed));
+        let source_failed = Rc::clone(&input.failed);
         let mut parser = Parser::with_options(input, options(true, false));
-        let trace = parser.by_ref().collect::<Vec<_>>();
+        let mut trace = Vec::new();
+        for event in parser.by_ref() {
+            if matches!(event, Ok((Event::DocumentEnd, _))) {
+                assert!(!source_failed.get(), "{source:?}");
+            }
+            trace.push(event);
+        }
         assert_eq!(completed(&trace), expected, "{source:?}: {trace:?}");
         assert!(trace.last().unwrap().is_err(), "{source:?}");
+        if expected == 1 {
+            assert!(source_failed.get(), "{source:?}");
+            assert_eq!(
+                trace.last().unwrap().as_ref().unwrap_err().kind(),
+                &source_error()
+            );
+        }
         assert!(parser.next().is_none());
         assert!(consumed.get() <= source.chars().count());
     }

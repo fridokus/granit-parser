@@ -4460,12 +4460,16 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
                 // Add content non-blank characters to the scalar.
                 let mut end = false;
                 while !end {
-                    // Fill the buffer once and process all characters in the buffer until the next
-                    // fetch. `next_can_be_plain_scalar` needs 2 lookahead characters, so keep one
-                    // spare slot for normal inputs while still forcing progress for very small
-                    // custom buffer lengths.
-                    self.input.lookahead(self.input.bufmaxlen());
-                    let chunk_len = self.input.bufmaxlen().saturating_sub(1).max(1);
+                    // Speculative bulk lookahead can encounter a source failure before the
+                    // scalar needs it. Go mode requests only the two characters required by
+                    // `next_can_be_plain_scalar`; default mode retains bulk scanning.
+                    let lookahead = if self.options.go_compatible_token_lookahead {
+                        2
+                    } else {
+                        self.input.bufmaxlen()
+                    };
+                    self.input.lookahead(lookahead);
+                    let chunk_len = lookahead.saturating_sub(1).max(1);
                     let (stop, chars_consumed) = if let Some(output) = string.as_mut() {
                         self.input
                             .fetch_plain_scalar_chunk(output, chunk_len, self.flow_level > 0)
