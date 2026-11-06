@@ -310,6 +310,33 @@ To balance requirements for all use cases, the compliance is governed by setting
   ```
 
 
+* **Optional Go `yaml.v3` token lookahead**
+
+  `options! { go_compatible_token_lookahead: true }` makes the scanner prefetch two
+  following YAML syntax tokens before yielding the current token, also resolving any
+  potential simple key at the queue head. Comment metadata does not satisfy this window.
+  A lexical or source failure during prefetch suppresses the uncommitted queue; clean EOF
+  still drains it normally. This changes which prefix events are observable before an
+  error, not token contents, spans, tags, or anchor IDs. No source rewriting or retries
+  are performed.
+
+  The option defaults to `false` and is independent of `go_compatible_anchors`. When
+  comments are emitted, prefetch respects `max_buffered_comment_events`. This extension
+  also remains fork-only pending upstream approval.
+
+  ```rust
+  use granit_parser::{options, Event, Parser};
+
+  let events = Parser::new_from_str_with_options(
+      "first: value\n---\n[second]\n",
+      options! { go_compatible_token_lookahead: true },
+  ).collect::<Result<Vec<_>, _>>()?;
+  assert_eq!(events.iter().filter(|(event, _)| {
+      matches!(event, Event::DocumentEnd)
+  }).count(), 2);
+  # Ok::<(), granit_parser::ScanError>(())
+  ```
+
 ### JSON-style Unicode surrogate pairs
 This parser supports explicit handling for JSON-style Unicode surrogate pairs in quoted scalar escape sequences.
 * `\uXXXX` escapes that encode a high surrogate are now required to be followed immediately by a valid low surrogate escape, and both escapes are combined into the corresponding Unicode scalar value.

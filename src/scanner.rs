@@ -1635,7 +1635,7 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
     /// Preserve either before searching the unread input; the source cannot be rewound.
     pub(crate) fn proceed_next_document(
         &mut self,
-        token: Option<QueuedToken<'input>>,
+        mut token: Option<QueuedToken<'input>>,
     ) -> ScanResult {
         self.check_source_error()?;
         self.input.lookahead(4);
@@ -1644,24 +1644,30 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
         let cursor = self.mark;
         let at_line_end = self.input.next_is_z() || self.input.next_is_break();
         let at_real_nul = !self.input.next_is_z() && self.input.peek() == '\0';
+        let is_boundary = |token: &QueuedToken<'input>| {
+            match token.1 {
+                QueuedTokenType::DocumentStart => {
+                    // A real NUL is invalid content, not the EOF delimiter used by input helpers.
+                    cursor != token.0.end || !at_real_nul
+                }
+                QueuedTokenType::DocumentEnd => {
+                    // An end marker is queued before its trailing line is validated. A scanner
+                    // error can therefore leave an invalid `... trailing` in the token queue.
+                    cursor.line > token.0.end.line || at_line_end
+                }
+                QueuedTokenType::StreamEnd => true,
+                _ => false,
+            }
+        };
+        if self.options.go_compatible_token_lookahead
+            && self.preserve_prefetched_boundary(&mut token, is_boundary)
+        {
+            return Ok(());
+        }
         let boundary = token
             .into_iter()
             .chain(self.tokens.drain(..))
-            .find(|token| {
-                match token.1 {
-                    QueuedTokenType::DocumentStart => {
-                        // A real NUL is invalid content, not the EOF delimiter used by input helpers.
-                        cursor != token.0.end || !at_real_nul
-                    }
-                    QueuedTokenType::DocumentEnd => {
-                        // An end marker is queued before its trailing line is validated. A scanner
-                        // error can therefore leave an invalid `... trailing` in the token queue.
-                        cursor.line > token.0.end.line || at_line_end
-                    }
-                    QueuedTokenType::StreamEnd => true,
-                    _ => false,
-                }
-            });
+            .find(is_boundary);
         self.reset_document_state();
         if let Some(boundary) = boundary {
             self.queue_recovery_boundary(boundary);
@@ -1722,6 +1728,42 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
                 self.skip_non_blank();
             }
         }
+    }
+
+    fn preserve_prefetched_boundary(
+        &mut self,
+        token: &mut Option<QueuedToken<'input>>,
+        is_boundary: impl Fn(&QueuedToken<'input>) -> bool,
+    ) -> bool {
+        let Some(index) = token.iter().chain(self.tokens.iter()).position(is_boundary) else {
+            return false;
+        };
+        // A parser-held token was already counted as emitted. Reinsert it before discarding
+        // abandoned tokens so all remaining simple-key token numbers stay absolute.
+        if let Some(token) = token.take() {
+            self.tokens.push_front(token);
+            self.tokens_parsed -= 1;
+        }
+        self.tokens.drain(..index);
+        self.tokens_parsed += index;
+        self.first_simple_key = None;
+        for (index, key) in self.simple_keys.iter_mut().enumerate() {
+            if key.token_number < self.tokens_parsed {
+                key.possible = false;
+            }
+            if key.possible {
+                self.first_simple_key.get_or_insert(index);
+            }
+        }
+        // The reader and syntax stacks already describe the retained prefetched tokens.
+        self.failed = false;
+        self.stream_end_produced = false;
+        self.token_available = false;
+        #[cfg(feature = "comments")]
+        {
+            self.deferred_error = None;
+        }
+        true
     }
 
     /// Consume only a valid end-marker suffix; malformed suffixes remain discarded document text.
@@ -1786,7 +1828,7 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
         self.document_prefix_allowed = matches!(token.1, QueuedTokenType::DocumentEnd);
         self.disallow_simple_key();
         self.tokens.push_back(token);
-        self.token_available = true;
+        self.token_available = !self.options.go_compatible_token_lookahead;
     }
 
     /// Source failures cannot be recovered by discarding YAML syntax.
@@ -1997,7 +2039,7 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
     /// Returns `ScanError` when scanning fails to find an expected next token.
     pub(crate) fn next_queued_token(&mut self) -> Result<Option<QueuedToken<'input>>, ScanError> {
         #[cfg(feature = "comments")]
-        if self.deferred_error.is_some() {
+        if !self.options.go_compatible_token_lookahead && self.deferred_error.is_some() {
             if !matches!(
                 self.tokens.front().map(|token| &token.1),
                 Some(QueuedTokenType::Comment(_))
@@ -2016,10 +2058,12 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
         if !self.token_available {
             #[cfg(feature = "comments")]
             if let Err(error) = self.fetch_more_tokens() {
-                if matches!(
-                    self.tokens.front().map(|token| &token.1),
-                    Some(QueuedTokenType::Comment(_))
-                ) {
+                if !self.options.go_compatible_token_lookahead
+                    && matches!(
+                        self.tokens.front().map(|token| &token.1),
+                        Some(QueuedTokenType::Comment(_))
+                    )
+                {
                     self.deferred_error = Some(error);
                 } else {
                     return Err(error);
@@ -2083,9 +2127,21 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
                 }
             }
 
-            // Stop fetching immediately after document end/start markers
-            // to allow the parser to emit the event before reading more content.
-            if let Some(token) = self.tokens.back() {
+            if self.options.go_compatible_token_lookahead {
+                #[cfg(feature = "comments")]
+                let ready = self.go_token_lookahead_ready()?;
+                #[cfg(not(feature = "comments"))]
+                let ready = self.tokens.len() >= 3;
+                need_more |= !ready;
+                // Physical EOF commits the tail without manufacturing extra stream-end tokens.
+                if matches!(
+                    self.tokens.back().map(|token| &token.1),
+                    Some(QueuedTokenType::StreamEnd)
+                ) {
+                    break;
+                }
+            } else if let Some(token) = self.tokens.back() {
+                // Default mode publishes document boundaries before reading later content.
                 if matches!(
                     token.1,
                     QueuedTokenType::DocumentEnd | QueuedTokenType::DocumentStart
@@ -2102,6 +2158,29 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
         self.token_available = true;
 
         Ok(())
+    }
+
+    #[cfg(feature = "comments")]
+    fn go_token_lookahead_ready(&self) -> Result<bool, ScanError> {
+        let mut syntax_tokens = 0;
+        let mut comments = 0;
+        for token in &self.tokens {
+            if matches!(token.1, QueuedTokenType::Comment(_)) {
+                comments += 1;
+                if comments > self.options.max_buffered_comment_events {
+                    return Err(ScanError::from_kind(
+                        token.0.start,
+                        ErrorKind::TooManyComments,
+                    ));
+                }
+                continue;
+            }
+            syntax_tokens += 1;
+            if syntax_tokens == 3 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Mark simple keys that can no longer be keys as such.

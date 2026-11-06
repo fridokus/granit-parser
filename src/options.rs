@@ -47,6 +47,18 @@ pub struct Options {
     /// Scalar text, tags, directives, alias resolution, and resource limits are unchanged.
     /// Unknown anchors still fail unless [`Self::emit_unresolved_aliases`] is enabled.
     pub go_compatible_anchors: bool,
+    /// Require Go `yaml.v3`-compatible token lookahead before yielding scanner tokens.
+    ///
+    /// Defaults to `false`. When enabled, a token is committed only after two following YAML
+    /// syntax tokens are available and any potential simple key at the queue head is resolved.
+    /// Comment presentation tokens do not satisfy this lookahead. Clean end-of-input drains
+    /// the remaining tokens normally, but a lexical or source failure during prefetch stops
+    /// parsing without yielding the uncommitted queue, including comments.
+    ///
+    /// This changes error-prefix timing, not token contents, source spans, or alias resolution.
+    /// It is independent of [`Self::go_compatible_anchors`]. With comment emission enabled,
+    /// prefetched comments respect the existing buffered-comment limit.
+    pub go_compatible_token_lookahead: bool,
     /// Emit unresolved alias nodes instead of stopping at an unknown anchor.
     ///
     /// Defaults to `false`. When omitted or explicitly set to `false`, an alias without a
@@ -112,6 +124,7 @@ pub struct Options {
     /// collection entry or looking for the next document during recovery.
     ///
     /// The default is 96. A value of zero rejects the first comment that would need buffering.
+    /// Also bounds scanner comment buffering with [`Self::go_compatible_token_lookahead`].
     /// This option is available only with the `comments` Cargo feature.
     #[cfg(feature = "comments")]
     pub max_buffered_comment_events: usize,
@@ -166,6 +179,7 @@ impl Default for Options {
             strict_indentation: false,
             disallow_directives: false,
             go_compatible_anchors: false,
+            go_compatible_token_lookahead: false,
             emit_unresolved_aliases: false,
             emit_anchor_events: false,
             emit_comments: cfg!(feature = "comments"),
