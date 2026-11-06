@@ -35,6 +35,18 @@ pub struct Options {
     /// Percent signs inside scalars and comments are unaffected.
     /// Defaults to false.
     pub disallow_directives: bool,
+    /// Use Go `yaml.v3`-compatible anchor and alias name scanning.
+    ///
+    /// Defaults to `false`, preserving YAML 1.2 anchor names, including colons and quotes.
+    /// When enabled, both names contain only ASCII letters, digits, `_`, and `-`.
+    /// Alias keys in flow mappings (including implicit mappings in flow sequences) may have
+    /// values adjacent to `:`, such as `{*key:"value"}` or `[*key:[value]]`.
+    /// This does not allow compact alias key/value forms in block context.
+    ///
+    /// This is a lexical compatibility policy, not a YAML version or scalar-schema switch.
+    /// Scalar text, tags, directives, alias resolution, and resource limits are unchanged.
+    /// Unknown anchors still fail unless [`Self::emit_unresolved_aliases`] is enabled.
+    pub go_compatible_anchors: bool,
     /// Emit unresolved alias nodes instead of stopping at an unknown anchor.
     ///
     /// Defaults to `false`. When omitted or explicitly set to `false`, an alias without a
@@ -153,6 +165,7 @@ impl Default for Options {
         Self {
             strict_indentation: false,
             disallow_directives: false,
+            go_compatible_anchors: false,
             emit_unresolved_aliases: false,
             emit_anchor_events: false,
             emit_comments: cfg!(feature = "comments"),

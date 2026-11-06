@@ -18,6 +18,7 @@ fn options_macro_starts_with_defaults_and_applies_fields() {
     let defaults = Options::default();
     assert!(!defaults.strict_indentation);
     assert!(!defaults.disallow_directives);
+    assert!(!defaults.go_compatible_anchors);
     assert!(!defaults.emit_unresolved_aliases);
     assert_eq!(defaults.emit_comments, cfg!(feature = "comments"));
     #[cfg(feature = "comments")]
@@ -32,6 +33,7 @@ fn options_macro_starts_with_defaults_and_applies_fields() {
     let options = granit_parser::options! {
         strict_indentation: true,
         disallow_directives: true,
+        go_compatible_anchors: true,
         emit_unresolved_aliases: true,
         emit_comments: false,
         #[cfg(feature = "comments")]
@@ -45,6 +47,7 @@ fn options_macro_starts_with_defaults_and_applies_fields() {
 
     assert!(options.strict_indentation);
     assert!(options.disallow_directives);
+    assert!(options.go_compatible_anchors);
     assert!(options.emit_unresolved_aliases);
     assert!(!options.emit_comments);
     #[cfg(feature = "comments")]

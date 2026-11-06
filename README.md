@@ -283,6 +283,32 @@ To balance requirements for all use cases, the compliance is governed by setting
   assert!(parser.collect::<Result<Vec<_>, _>>().is_ok());
   ```
 
+* **Optional Go `yaml.v3` anchor/alias lexing**
+
+  `options! { go_compatible_anchors: true }` restricts anchor and alias names to ASCII
+  letters, digits, `_`, and `-`. In flow collections, alias keys can use compact values,
+  including quoted, plain, tagged, and collection values. Block alias key/value forms still
+  require ordinary YAML separation. This is not a YAML version or scalar-schema switch;
+  it does not rewrite scalar text, tags, directives, or source positions. Unknown aliases
+  remain errors unless `emit_unresolved_aliases` is explicitly enabled.
+
+  The option defaults to `false`: YAML 1.2 anchor names containing colons or quotes retain
+  their existing meaning. This feature remains fork-only pending upstream approval.
+
+  ```rust
+  use granit_parser::{options, Event, Parser};
+
+  let yaml = "name: &key greeting\nentries: {*key:\"hello\"}\n";
+  let events = Parser::new_from_str_with_options(
+      yaml,
+      options! { go_compatible_anchors: true },
+  ).collect::<Result<Vec<_>, _>>()?;
+  assert!(events.iter().any(|(event, span)| {
+      matches!(event, Event::Alias(1)) && span.slice(yaml) == Some("*key")
+  }));
+  # Ok::<(), granit_parser::ScanError>(())
+  ```
+
 
 ### JSON-style Unicode surrogate pairs
 This parser supports explicit handling for JSON-style Unicode surrogate pairs in quoted scalar escape sequences.

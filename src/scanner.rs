@@ -19,7 +19,7 @@ use core::char;
 
 use crate::{
     char_traits::{
-        as_hex, find_non_printable, is_anchor_char, is_blank_or_breakz, is_bom, is_break,
+        as_hex, find_non_printable, is_alpha, is_anchor_char, is_blank_or_breakz, is_bom, is_break,
         is_breakz, is_flow, is_hex, is_printable, is_tag_char, is_uri_char, is_yaml_non_space,
         is_z,
     },
@@ -3106,22 +3106,41 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
         self.save_simple_key();
         self.disallow_simple_key();
 
+        let token_index = self.tokens.len();
         let tok = self.scan_anchor(alias)?;
 
-        self.tokens.push_back(tok.into());
+        if alias && self.options.go_compatible_anchors && self.flow_level > 0 {
+            // Like quoted flow keys, Go-compatible alias keys permit adjacent values.
+            // Keep the alias span intact and place any scanned comment after its token.
+            self.adjacent_value_allowed_at = if self.skip_to_next_token()?.saw_comment {
+                usize::MAX
+            } else {
+                self.mark.index()
+            };
+        }
+
+        self.insert_token(token_index, tok);
 
         Ok(())
     }
 
     fn scan_anchor(&mut self, alias: bool) -> Result<Token<'input>, ScanError> {
         let start_mark = self.mark;
+        let go_compatible_anchors = self.options.go_compatible_anchors;
+        let is_name_char = |character| {
+            if go_compatible_anchors {
+                is_alpha(character)
+            } else {
+                is_anchor_char(character)
+            }
+        };
 
         // Skip `&` / `*`.
         self.skip_non_blank();
 
         // Borrow from input when possible.
         if let Some(start) = self.input.byte_offset() {
-            while is_anchor_char(self.input.look_ch()) {
+            while is_name_char(self.input.look_ch()) {
                 self.skip_non_blank();
             }
 
@@ -3136,6 +3155,7 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
                     ErrorKind::MissingAnchorOrAliasName,
                 ));
             }
+            self.validate_anchor_terminator()?;
 
             let cow = if let Some(slice) = self.try_borrow_slice(start, end) {
                 Cow::Borrowed(slice)
@@ -3157,7 +3177,7 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
         }
 
         let mut string = String::new();
-        while is_anchor_char(self.input.look_ch()) {
+        while is_name_char(self.input.look_ch()) {
             string.push(self.input.peek());
             self.skip_non_blank();
         }
@@ -3168,6 +3188,7 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
                 ErrorKind::MissingAnchorOrAliasName,
             ));
         }
+        self.validate_anchor_terminator()?;
 
         let tok = if alias {
             TokenType::Alias(string.into())
@@ -3175,6 +3196,17 @@ impl<'input, T: BorrowedInput<'input>> Scanner<'input, T> {
             TokenType::Anchor(string.into())
         };
         Ok(Token(Span::new(start_mark, self.mark), tok))
+    }
+
+    fn validate_anchor_terminator(&self) -> ScanResult {
+        let character = self.input.peek();
+        if self.options.go_compatible_anchors
+            && !is_blank_or_breakz(character)
+            && !matches!(character, '?' | ':' | ',' | ']' | '}' | '%' | '@' | '`')
+        {
+            return Err(self.scan_error(ErrorKind::UnexpectedCharacter { character }));
+        }
+        Ok(())
     }
 
     fn fetch_flow_collection_start(&mut self, tok: TokenType<'input>) -> ScanResult {
@@ -5217,6 +5249,35 @@ mod test {
                 !is_anchor_char(c),
                 "character {c:?} must not be accepted in anchor/alias names"
             );
+        }
+    }
+
+    #[test]
+    fn optional_go_anchor_grammar_stops_both_names_before_a_colon() {
+        for (source, alias) in [("&a:\"short\"", false), ("*a:\"short\"", true)] {
+            for enabled in [false, true] {
+                let options = crate::options! { go_compatible_anchors: enabled };
+                let mut scanner = Scanner::with_options(StrInput::new(source), options.clone());
+                let token = scanner.scan_anchor(alias).unwrap();
+                let name = if enabled { "a" } else { "a:\"short\"" };
+                let expected = if alias {
+                    TokenType::Alias(name.into())
+                } else {
+                    TokenType::Anchor(name.into())
+                };
+                assert_eq!(token.1, expected);
+                assert_eq!(
+                    token.0.slice(source),
+                    Some(if enabled { &source[..2] } else { source })
+                );
+                assert_eq!(scanner.input.peek(), if enabled { ':' } else { '\0' });
+                let mut scanner =
+                    Scanner::with_options(BufferedInput::new(source.chars()), options);
+                let owned = scanner.scan_anchor(alias).unwrap();
+                assert_eq!(owned.1, expected);
+                assert_eq!(owned.0, token.0);
+                assert_eq!(scanner.input.peek(), if enabled { ':' } else { '\0' });
+            }
         }
     }
 
